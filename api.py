@@ -13,7 +13,7 @@ CACHE_EXPIRATION = 60  # Durée du cache en secondes
 API_URL_BASE = f"https://games.roblox.com/v1/games/{UNIVERSE_ID}/servers/Public?sortOrder=Asc&limit=100"
 
 # 🔑 Clé d’accès secrète (modifiable via variable d’environnement)
-API_KEY = os.environ.get("API_KEY", "")
+API_KEY = os.environ.get("API_KEY", os.environ.get("KEY"))
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
