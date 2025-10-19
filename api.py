@@ -1,6 +1,7 @@
 import os
 import time
 import random
+import threading
 from flask import Flask, jsonify, request
 import requests
 
@@ -9,10 +10,10 @@ app = Flask(__name__)
 # ================== CONFIGURATION ==================
 UNIVERSE_ID = "109983668079237"
 MIN_PLAYERS = 2
-CACHE_EXPIRATION = 60  # Durée du cache en secondes
+CACHE_EXPIRATION = 60  # secondes
 API_URL_BASE = f"https://games.roblox.com/v1/games/{UNIVERSE_ID}/servers/Public?sortOrder=Desc&excludeFullGames=true&limit=100"
 
-# 🔑 Clé d’accès secrète (modifiable via variable d’environnement)
+# 🔑 Clé d’accès
 API_KEY = os.environ.get("API_KEY", os.environ.get("KEY"))
 
 USER_AGENTS = [
@@ -23,12 +24,14 @@ USER_AGENTS = [
 ]
 
 # ================== CACHE GLOBAL ==================
-cache_data = None
+cache_data = []
 cache_timestamp = 0
+fetching_lock = threading.Lock()
+last_fetch_success = True
+last_error_time = 0
 
 # ================== OUTILS ==================
 def make_headers():
-    """Construit des en-têtes HTTP aléatoires pour éviter le rate-limit Roblox."""
     return {
         "User-Agent": random.choice(USER_AGENTS),
         "Accept": "application/json, text/plain, */*",
@@ -42,48 +45,63 @@ def make_headers():
     }
 
 def fetch_all_jobs():
-    """Récupère tous les serveurs publics avec leurs joueurs."""
-    servers_info = []
-    next_page_cursor = None
-    session = requests.Session()
+    """Récupère tous les serveurs, gère les rate-limits et met à jour le cache."""
+    global cache_data, cache_timestamp, last_fetch_success, last_error_time
 
-    while True:
-        headers = make_headers()
-        url_to_fetch = API_URL_BASE
-        if next_page_cursor:
-            url_to_fetch += f"&cursor={next_page_cursor}"
+    with fetching_lock:
+        print("🔄 Début de la récupération complète des serveurs Roblox...")
+        servers_info = []
+        next_page_cursor = None
+        session = requests.Session()
 
-        try:
-            response = session.get(url_to_fetch, headers=headers, timeout=8)
-            response.raise_for_status()
-            data = response.json()
+        while True:
+            url = API_URL_BASE
+            if next_page_cursor:
+                url += f"&cursor={next_page_cursor}"
+            headers = make_headers()
 
-            for server in data.get("data", []):
-                playing = server.get("playing", 0)
-                if playing >= MIN_PLAYERS:
-                    servers_info.append({
-                        "id": server.get("id"),
-                        "playing": playing,
-                        "maxPlayers": server.get("maxPlayers", None)
-                    })
+            try:
+                response = session.get(url, headers=headers, timeout=10)
 
-            next_page_cursor = data.get("nextPageCursor")
-            if not next_page_cursor:
+                # 🧱 Gestion du rate-limit
+                if response.status_code == 429:
+                    print("🚫 Rate limit détecté → pause de 2 minutes 30 avant reprise.")
+                    last_fetch_success = False
+                    last_error_time = time.time()
+                    time.sleep(150)
+                    continue
+
+                response.raise_for_status()
+                data = response.json()
+
+                # Extraction des serveurs valides
+                for server in data.get("data", []):
+                    playing = server.get("playing", 0)
+                    if playing >= MIN_PLAYERS:
+                        servers_info.append({
+                            "id": server.get("id"),
+                            "playing": playing,
+                            "maxPlayers": server.get("maxPlayers", None)
+                        })
+
+                next_page_cursor = data.get("nextPageCursor")
+                if not next_page_cursor:
+                    break
+
+                time.sleep(random.uniform(0.5, 1.2))
+
+            except Exception as e:
+                print(f"⚠️ Erreur réseau ou API : {e}")
+                time.sleep(3)
                 break
 
-            # Petit délai aléatoire pour éviter le rate-limit
-            time.sleep(random.uniform(0.5, 1.2))
-
-        except requests.RequestException as e:
-            print(f"⚠️ Erreur lors du fetch : {e}")
-            time.sleep(2)
-            break
-
-    return servers_info
+        cache_data = servers_info
+        cache_timestamp = time.time()
+        last_fetch_success = True
+        print(f"✅ {len(servers_info)} serveurs enregistrés dans le cache.")
 
 # ================== SECURITE ==================
 def check_api_key(req: request) -> bool:
-    """Vérifie la clé d’API dans les headers ou la query string."""
     key = req.args.get("key") or req.headers.get("X-API-Key")
     return key == API_KEY
 
@@ -94,18 +112,28 @@ def home():
 
 @app.route('/get_jobs')
 def get_jobs():
-    global cache_data, cache_timestamp
+    global cache_data, cache_timestamp, last_fetch_success, last_error_time
 
-    # Vérification de la clé d’API
     if not check_api_key(request):
         return jsonify({"status": "error", "message": "⛔ Clé API invalide ou manquante."}), 403
 
     current_time = time.time()
     time_since_last_fetch = current_time - cache_timestamp
 
-    # Utilisation du cache si valide
+    # Si en rate-limit, on renvoie le cache actuel
+    if not last_fetch_success and (current_time - last_error_time < 150):
+        wait_remaining = int(150 - (current_time - last_error_time))
+        print(f"🕒 Rate limit actif, envoi du cache (encore {wait_remaining}s d’attente).")
+        return jsonify({
+            "status": "rate_limited",
+            "wait_seconds_remaining": wait_remaining,
+            "servers_loaded": len(cache_data),
+            "servers": cache_data
+        })
+
+    # Si cache encore valide
     if cache_data and time_since_last_fetch < CACHE_EXPIRATION:
-        print(f"♻️ Réponse servie depuis le cache ({int(time_since_last_fetch)}s depuis la dernière mise à jour).")
+        print(f"♻️ Cache valide (mis à jour il y a {int(time_since_last_fetch)}s).")
         return jsonify({
             "status": "cached",
             "cache_age_seconds": int(time_since_last_fetch),
@@ -113,17 +141,16 @@ def get_jobs():
             "servers": cache_data
         })
 
-    # Sinon, nouvelle requête à Roblox
-    print("🔄 Cache expiré ou vide → récupération depuis Roblox...")
-    servers = fetch_all_jobs()
-    cache_data = servers
-    cache_timestamp = time.time()
+    # Si on peut rafraîchir (pas en cours de fetch)
+    if not fetching_lock.locked():
+        threading.Thread(target=fetch_all_jobs, daemon=True).start()
+        print("🚀 Lancement d’un thread de mise à jour du cache Roblox.")
 
-    print(f"✅ {len(servers)} serveurs mis en cache.")
     return jsonify({
-        "status": "fresh",
-        "servers_loaded": len(servers),
-        "servers": servers
+        "status": "updating",
+        "message": "Les serveurs sont en cours de mise à jour. Cache actuel renvoyé.",
+        "servers_loaded": len(cache_data),
+        "servers": cache_data
     })
 
 # ================== LANCEMENT ==================
