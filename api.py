@@ -8,7 +8,7 @@ app = Flask(__name__)
 
 # ================== CONFIGURATION ==================
 UNIVERSE_ID = "109983668079237"
-MIN_PLAYERS = 2
+MIN_PLAYERS = 7
 CACHE_EXPIRATION = 60  # Durée du cache en secondes
 API_URL_BASE = f"https://games.roblox.com/v1/games/{UNIVERSE_ID}/servers/Public?sortOrder=Asc&limit=100"
 
