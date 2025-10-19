@@ -10,7 +10,7 @@ app = Flask(__name__)
 UNIVERSE_ID = "109983668079237"
 MIN_PLAYERS = 2
 CACHE_EXPIRATION = 60  # Durée du cache en secondes
-API_URL_BASE = f"https://games.roblox.com/v1/games/{UNIVERSE_ID}/servers/Public?sortOrder=Asc&limit=100"
+API_URL_BASE = f"https://games.roblox.com/v1/games/{UNIVERSE_ID}/servers/Public?sortOrder=Desc&excludeFullGames=true&limit=100"
 
 # 🔑 Clé d’accès secrète (modifiable via variable d’environnement)
 API_KEY = os.environ.get("API_KEY", os.environ.get("KEY"))
