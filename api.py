@@ -7,246 +7,255 @@ import requests
 
 app = Flask(__name__)
 
-# ================== CONFIG ==================
+# ==================== CONFIGURATION ====================
 UNIVERSE_ID = "109983668079237"
 MIN_PLAYERS = 2
-API_URL_BASE = f"https://games.roblox.com/v1/games/{UNIVERSE_ID}/servers/Public?sortOrder=Desc&excludeFullGames=true&limit=100"
-
-# durée de pause après un fetch complet (en secondes)
 COOLDOWN_SECONDS = 60
-
-API_KEY = os.environ.get("API_KEY", os.environ.get("KEY"))
+API_KEY = os.environ.get("API_KEY", os.environ.get("KEY", ""))
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
 ]
 
-# ================== ETAT GLOBAL ==================
-cache_data = []                # liste des serveurs (format dict)
-last_fetch_time = 0            # timestamp du dernier fetch fini (ou 0)
-cooldown_until = 0             # tant que time.time() < cooldown_until -> on n'appelle pas Roblox
-fetching_lock = threading.Lock()
-session = requests.Session()
-initial_fetch_done = threading.Event()  # Pour attendre le premier fetch
+# ==================== VARIABLES GLOBALES ====================
+servers_cache = []
+last_update = 0
+next_update_allowed = 0
+fetch_lock = threading.Lock()
+is_fetching = False
 
-# ================== UTIL ==================
-def make_headers():
-    return {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-        "Connection": "keep-alive",
-        "Referer": "https://www.roblox.com/",
-        "Origin": "https://www.roblox.com",
-        "DNT": "1"
-    }
+# ==================== FONCTIONS ====================
+def log(message):
+    """Affiche un log avec timestamp"""
+    timestamp = time.strftime("%H:%M:%S")
+    print(f"[{timestamp}] {message}")
 
-def _fetch_all_pages_and_update_cache():
-    """Récupère toutes les pages disponibles et met à jour cache_data.
-       Si 429 reçu -> on stoppe et on met cooldown.
-    """
-    global cache_data, last_fetch_time, cooldown_until
-
-    with fetching_lock:
-        print("🔄 Début fetch complet (toutes les pages)...")
-        collected = []
-        next_cursor = None
-        pages_fetched = 0
-
+def fetch_servers():
+    """Récupère tous les serveurs depuis l'API Roblox"""
+    global servers_cache, last_update, next_update_allowed, is_fetching
+    
+    # Empêcher fetch simultanés
+    if not fetch_lock.acquire(blocking=False):
+        log("⏸️  Fetch déjà en cours, ignoré")
+        return False
+    
+    try:
+        is_fetching = True
+        log("🔄 Début de la récupération des serveurs...")
+        
+        all_servers = []
+        cursor = None
+        page = 0
+        
         while True:
-            # Si on est tombé dans un cooldown externe (autre thread l'a mis), on interrompt proprement
-            if time.time() < cooldown_until:
-                print("⏸️ Cooldown détecté pendant le fetch — on stoppe le fetch pour éviter d'autres hits.")
-                break
-
-            url = API_URL_BASE
-            if next_cursor:
-                url += f"&cursor={next_cursor}"
-
+            page += 1
+            
+            # Construction de l'URL
+            url = f"https://games.roblox.com/v1/games/{UNIVERSE_ID}/servers/Public"
+            params = {
+                "sortOrder": "Desc",
+                "excludeFullGames": "true",
+                "limit": 100
+            }
+            if cursor:
+                params["cursor"] = cursor
+            
             try:
-                headers = make_headers()
-                resp = session.get(url, headers=headers, timeout=15)
-
-                # Gestion rate-limit : si 429 on met le cooldown et on arrête
-                if resp.status_code == 429:
-                    print("🚫 429 rate-limit détecté, on active cooldown d'1 minute et on stoppe le fetch.")
-                    # Si on a déjà collecté des données, on les garde
-                    if collected:
-                        cache_data = collected
-                        last_fetch_time = time.time()
-                        print(f"✅ Cache partiel sauvegardé ({len(cache_data)} serveurs) avant cooldown.")
-                    cooldown_until = time.time() + COOLDOWN_SECONDS
-                    break
-
-                resp.raise_for_status()
-                data = resp.json()
-                pages_fetched += 1
-
-                for server in data.get("data", []):
-                    playing = server.get("playing", 0)
-                    if playing >= MIN_PLAYERS:
-                        collected.append({
+                # Requête HTTP
+                headers = {
+                    "User-Agent": random.choice(USER_AGENTS),
+                    "Accept": "application/json"
+                }
+                
+                response = requests.get(url, params=params, headers=headers, timeout=15)
+                
+                # Gestion rate limit
+                if response.status_code == 429:
+                    log(f"⛔ Rate limit (429) - Cache actuel: {len(all_servers)} serveurs")
+                    if all_servers:
+                        servers_cache = all_servers
+                        last_update = time.time()
+                    next_update_allowed = time.time() + COOLDOWN_SECONDS
+                    return len(all_servers) > 0
+                
+                # Erreur HTTP
+                if response.status_code != 200:
+                    log(f"❌ Erreur HTTP {response.status_code}")
+                    next_update_allowed = time.time() + 10
+                    return False
+                
+                # Parse JSON
+                data = response.json()
+                servers = data.get("data", [])
+                
+                # Filtrage des serveurs
+                filtered = 0
+                for server in servers:
+                    if server.get("playing", 0) >= MIN_PLAYERS:
+                        all_servers.append({
                             "id": server.get("id"),
-                            "playing": playing,
-                            "maxPlayers": server.get("maxPlayers", None)
+                            "playing": server.get("playing"),
+                            "maxPlayers": server.get("maxPlayers")
                         })
-
-                print(f"📄 Page {pages_fetched} récupérée : {len(data.get('data', []))} serveurs bruts, {len([s for s in data.get('data', []) if s.get('playing', 0) >= MIN_PLAYERS])} filtrés (>= {MIN_PLAYERS} joueurs)")
-
-                next_cursor = data.get("nextPageCursor")
-                if not next_cursor:
-                    # toutes les pages récupérées
-                    print("📦 Toutes les pages récupérées.")
+                        filtered += 1
+                
+                log(f"📄 Page {page}: {len(servers)} serveurs, {filtered} gardés (>= {MIN_PLAYERS} joueurs)")
+                
+                # Vérifier s'il y a d'autres pages
+                cursor = data.get("nextPageCursor")
+                if not cursor:
                     break
-
-                # petit délai aléatoire pour limiter risque de rate-limit
-                time.sleep(random.uniform(0.5, 1.2))
-
+                
+                # Pause entre les pages
+                time.sleep(random.uniform(0.5, 1.0))
+                
+            except requests.Timeout:
+                log(f"⏱️  Timeout page {page}")
+                break
             except requests.RequestException as e:
-                # En cas d'erreur réseau, on arrête et on planifie un petit cooldown court
-                print(f"⚠️ Erreur pendant fetch: {e}. Activation d'un court cooldown (10s).")
-                # Sauvegarder ce qu'on a déjà si c'est mieux que rien
-                if collected and len(collected) > len(cache_data):
-                    cache_data = collected
-                    last_fetch_time = time.time()
-                    print(f"✅ Cache partiel sauvegardé ({len(cache_data)} serveurs) après erreur.")
-                cooldown_until = time.time() + 10
+                log(f"❌ Erreur réseau: {str(e)[:100]}")
                 break
             except Exception as e:
-                print(f"⚠️ Exception inattendue pendant fetch: {e}. Activation d'un court cooldown (10s).")
-                if collected and len(collected) > len(cache_data):
-                    cache_data = collected
-                    last_fetch_time = time.time()
-                    print(f"✅ Cache partiel sauvegardé ({len(cache_data)} serveurs) après exception.")
-                cooldown_until = time.time() + 10
+                log(f"❌ Erreur inattendue: {str(e)[:100]}")
                 break
-
-        # Mettre à jour cache uniquement si on a au moins quelque chose
-        if collected:
-            cache_data = collected
-            last_fetch_time = time.time()
-            # après un fetch réussi -> cooldown d'1 minute
-            cooldown_until = time.time() + COOLDOWN_SECONDS
-            print(f"✅ Cache mis à jour ({len(cache_data)} serveurs). Cooldown jusqu'à {time.strftime('%H:%M:%S', time.localtime(cooldown_until))}.")
-        else:
-            print("⚠️ AUCUN serveur collecté pendant le fetch ! Vérifiez le MIN_PLAYERS ou l'API.")
         
-        # Signaler que le premier fetch est terminé
-        initial_fetch_done.set()
+        # Mise à jour du cache
+        if all_servers:
+            servers_cache = all_servers
+            last_update = time.time()
+            next_update_allowed = time.time() + COOLDOWN_SECONDS
+            log(f"✅ {len(all_servers)} serveurs en cache - Prochain fetch dans {COOLDOWN_SECONDS}s")
+            return True
+        else:
+            log(f"⚠️  Aucun serveur trouvé (MIN_PLAYERS={MIN_PLAYERS})")
+            next_update_allowed = time.time() + 10
+            return False
+            
+    finally:
+        is_fetching = False
+        fetch_lock.release()
 
-def maybe_start_fetch_in_background():
-    """Démarre un thread de fetch si possible (pas en cooldown et pas déjà en cours)."""
-    if time.time() < cooldown_until:
-        # on est en cooldown -> ne pas fetch
-        print("🕒 Cooldown actif, pas de nouveau fetch.")
+def start_background_fetch():
+    """Lance un fetch en arrière-plan si nécessaire"""
+    if time.time() < next_update_allowed:
         return
-
-    # Si déjà en cours -> rien
-    if fetching_lock.locked():
-        print("🔒 Fetch déjà en cours, on n'en lance pas un autre.")
+    
+    if is_fetching:
         return
+    
+    thread = threading.Thread(target=fetch_servers, daemon=True)
+    thread.start()
 
-    # Lancer thread de fetch
-    th = threading.Thread(target=_fetch_all_pages_and_update_cache, daemon=True)
-    th.start()
-    print("🚀 Thread de fetch lancé en arrière-plan.")
-
-def check_api_key(req: request) -> bool:
+def check_api_key():
+    """Vérifie la clé API"""
     if not API_KEY:
-        return True  # Si pas de clé configurée, on accepte tout
-    key = req.args.get("key") or req.headers.get("X-API-Key")
+        return True
+    
+    key = request.args.get("key") or request.headers.get("X-API-Key")
     return key == API_KEY
 
-# ================== ROUTES ==================
-@app.route('/')
+# ==================== ROUTES ====================
+@app.route("/")
 def home():
     return jsonify({
+        "name": "Roblox Server Finder API",
         "status": "online",
-        "message": "✅ API Roblox Finder - En ligne",
-        "cache_size": len(cache_data),
+        "version": "2.0",
         "endpoints": {
-            "/get_jobs": "Récupère la liste des serveurs (requiert API key)"
+            "/get_jobs": "Récupère la liste des serveurs",
+            "/status": "Statut du service",
+            "/force_update": "Force une mise à jour (admin)"
         }
     })
 
-@app.route('/get_jobs')
+@app.route("/get_jobs")
 def get_jobs():
-    global cache_data, last_fetch_time, cooldown_until
-
-    # auth
-    if not check_api_key(request):
-        return jsonify({"status": "error", "message": "⛔ Clé API invalide ou manquante."}), 403
-
-    now = time.time()
-
-    # Si le cache est vide et qu'aucun fetch n'est en cours, on attend le premier fetch
-    if not cache_data and not initial_fetch_done.is_set():
-        print("⏳ Premier appel avec cache vide, attente du fetch initial...")
-        # Attendre max 15 secondes pour le premier fetch
-        initial_fetch_done.wait(timeout=15)
-
-    # Si on est en cooldown, on RENVOIE IMMÉDIATEMENT le cache (shuffle avant d'envoyer)
-    if now < cooldown_until and cache_data:
-        shuffled = cache_data.copy()
-        random.shuffle(shuffled)
+    if not check_api_key():
         return jsonify({
-            "status": "cooldown",
-            "cooldown_seconds_remaining": int(cooldown_until - now),
-            "servers_loaded": len(shuffled),
-            "servers": shuffled
-        })
-
-    # Si on n'est pas en cooldown :
-    # - si cache vide -> lancer fetch en arrière-plan et renvoyer cache (vide ou partiel)
-    # - si cache non vide -> on peut renvoyer cache shuffle et parallèlement tenter un fetch si aucune fetch en cours
-    maybe_start_fetch_in_background()
-
-    # renvoyer cache courant (randomisé) pour ne jamais bloquer
-    shuffled = cache_data.copy()
+            "status": "error",
+            "message": "Clé API invalide"
+        }), 403
+    
+    # Lancer un fetch si nécessaire
+    start_background_fetch()
+    
+    # Calculer le temps avant prochain fetch
+    time_until_next = max(0, int(next_update_allowed - time.time()))
+    
+    # Mélanger les serveurs pour l'équité
+    shuffled = servers_cache.copy()
     random.shuffle(shuffled)
-
-    status = "updating" if fetching_lock.locked() or (now >= cooldown_until and now - last_fetch_time > COOLDOWN_SECONDS) else "ok"
-
+    
     return jsonify({
-        "status": status,
-        "cooldown_seconds_remaining": max(0, int(cooldown_until - now)),
-        "servers_loaded": len(shuffled),
-        "servers": shuffled
+        "status": "ok",
+        "servers_count": len(shuffled),
+        "servers": shuffled,
+        "cooldown_remaining": time_until_next,
+        "is_updating": is_fetching,
+        "last_update": int(last_update) if last_update > 0 else None
     })
 
-@app.route('/status')
+@app.route("/status")
 def status():
-    """Endpoint pour vérifier l'état du service"""
-    now = time.time()
     return jsonify({
         "status": "online",
-        "cache_size": len(cache_data),
-        "min_players_filter": MIN_PLAYERS,
-        "universe_id": UNIVERSE_ID,
-        "last_fetch": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_fetch_time)) if last_fetch_time > 0 else None,
-        "seconds_since_last_fetch": int(now - last_fetch_time) if last_fetch_time > 0 else None,
-        "in_cooldown": now < cooldown_until,
-        "cooldown_remaining": max(0, int(cooldown_until - now)),
-        "fetch_in_progress": fetching_lock.locked(),
-        "initial_fetch_completed": initial_fetch_done.is_set()
+        "config": {
+            "universe_id": UNIVERSE_ID,
+            "min_players": MIN_PLAYERS,
+            "cooldown_seconds": COOLDOWN_SECONDS
+        },
+        "cache": {
+            "servers_count": len(servers_cache),
+            "last_update": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last_update)) if last_update > 0 else None,
+            "seconds_ago": int(time.time() - last_update) if last_update > 0 else None
+        },
+        "fetch": {
+            "is_fetching": is_fetching,
+            "next_allowed": time.strftime("%H:%M:%S", time.localtime(next_update_allowed)) if next_update_allowed > 0 else None,
+            "seconds_until_next": max(0, int(next_update_allowed - time.time()))
+        }
     })
 
-# ================== LANCEMENT ==================
+@app.route("/force_update")
+def force_update():
+    if not check_api_key():
+        return jsonify({"status": "error", "message": "Clé API invalide"}), 403
+    
+    global next_update_allowed
+    next_update_allowed = 0
+    
+    success = fetch_servers()
+    
+    return jsonify({
+        "status": "success" if success else "error",
+        "servers_count": len(servers_cache),
+        "message": f"Fetch {'réussi' if success else 'échoué'}"
+    })
+
+# ==================== DÉMARRAGE ====================
 if __name__ == "__main__":
-    print("🚀 Démarrage de l'API Roblox Finder...")
-    
-    # Lancer le premier fetch au démarrage
-    print("🔄 Lancement du fetch initial...")
-    threading.Thread(target=_fetch_all_pages_and_update_cache, daemon=True).start()
-    
     port = int(os.environ.get("PORT", 5000))
-    print(f"🌐 Serveur lancé sur le port {port}")
-    print(f"📡 Universe ID: {UNIVERSE_ID}")
-    print(f"🔑 API Key configurée: {'✅ Oui' if API_KEY else '⚠️ Non (mode ouvert)'}")
     
-    app.run(host='0.0.0.0', port=port)
+    log("=" * 50)
+    log("🚀 Roblox Server Finder API v2.0")
+    log("=" * 50)
+    log(f"📡 Universe ID: {UNIVERSE_ID}")
+    log(f"👥 Min Players: {MIN_PLAYERS}")
+    log(f"⏱️  Cooldown: {COOLDOWN_SECONDS}s")
+    log(f"🔑 API Key: {'✅ Configurée' if API_KEY else '❌ Aucune (mode ouvert)'}")
+    log(f"🌐 Port: {port}")
+    log("=" * 50)
+    
+    # Fetch initial
+    log("🔄 Fetch initial...")
+    if fetch_servers():
+        log(f"✅ {len(servers_cache)} serveurs en cache")
+    else:
+        log("⚠️  Fetch initial échoué, retry automatique au premier appel")
+    
+    log("=" * 50)
+    log("✅ Serveur prêt !")
+    
+    app.run(host="0.0.0.0", port=port, debug=False)
