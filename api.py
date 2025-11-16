@@ -56,6 +56,7 @@ def _fetch_all_pages_and_update_cache():
         print("🔄 Début fetch complet (toutes les pages)...")
         collected = []
         next_cursor = None
+        pages_fetched = 0
 
         while True:
             # Si on est tombé dans un cooldown externe (autre thread l'a mis), on interrompt proprement
@@ -69,16 +70,22 @@ def _fetch_all_pages_and_update_cache():
 
             try:
                 headers = make_headers()
-                resp = session.get(url, headers=headers, timeout=10)
+                resp = session.get(url, headers=headers, timeout=15)
 
                 # Gestion rate-limit : si 429 on met le cooldown et on arrête
                 if resp.status_code == 429:
                     print("🚫 429 rate-limit détecté, on active cooldown d'1 minute et on stoppe le fetch.")
+                    # Si on a déjà collecté des données, on les garde
+                    if collected:
+                        cache_data = collected
+                        last_fetch_time = time.time()
+                        print(f"✅ Cache partiel sauvegardé ({len(cache_data)} serveurs) avant cooldown.")
                     cooldown_until = time.time() + COOLDOWN_SECONDS
                     break
 
                 resp.raise_for_status()
                 data = resp.json()
+                pages_fetched += 1
 
                 for server in data.get("data", []):
                     playing = server.get("playing", 0)
@@ -89,6 +96,8 @@ def _fetch_all_pages_and_update_cache():
                             "maxPlayers": server.get("maxPlayers", None)
                         })
 
+                print(f"📄 Page {pages_fetched} récupérée : {len(data.get('data', []))} serveurs bruts, {len([s for s in data.get('data', []) if s.get('playing', 0) >= MIN_PLAYERS])} filtrés (>= {MIN_PLAYERS} joueurs)")
+
                 next_cursor = data.get("nextPageCursor")
                 if not next_cursor:
                     # toutes les pages récupérées
@@ -96,15 +105,24 @@ def _fetch_all_pages_and_update_cache():
                     break
 
                 # petit délai aléatoire pour limiter risque de rate-limit
-                time.sleep(random.uniform(0.4, 1.0))
+                time.sleep(random.uniform(0.5, 1.2))
 
             except requests.RequestException as e:
                 # En cas d'erreur réseau, on arrête et on planifie un petit cooldown court
                 print(f"⚠️ Erreur pendant fetch: {e}. Activation d'un court cooldown (10s).")
+                # Sauvegarder ce qu'on a déjà si c'est mieux que rien
+                if collected and len(collected) > len(cache_data):
+                    cache_data = collected
+                    last_fetch_time = time.time()
+                    print(f"✅ Cache partiel sauvegardé ({len(cache_data)} serveurs) après erreur.")
                 cooldown_until = time.time() + 10
                 break
             except Exception as e:
                 print(f"⚠️ Exception inattendue pendant fetch: {e}. Activation d'un court cooldown (10s).")
+                if collected and len(collected) > len(cache_data):
+                    cache_data = collected
+                    last_fetch_time = time.time()
+                    print(f"✅ Cache partiel sauvegardé ({len(cache_data)} serveurs) après exception.")
                 cooldown_until = time.time() + 10
                 break
 
@@ -114,9 +132,9 @@ def _fetch_all_pages_and_update_cache():
             last_fetch_time = time.time()
             # après un fetch réussi -> cooldown d'1 minute
             cooldown_until = time.time() + COOLDOWN_SECONDS
-            print(f"✅ Cache mis à jour ({len(cache_data)} serveurs). Cooldown jusqu'à {int(cooldown_until)}.")
+            print(f"✅ Cache mis à jour ({len(cache_data)} serveurs). Cooldown jusqu'à {time.strftime('%H:%M:%S', time.localtime(cooldown_until))}.")
         else:
-            print("ℹ️ Aucun serveur collecté pendant le fetch (ou fetch interrompu). Cache inchangé.")
+            print("⚠️ AUCUN serveur collecté pendant le fetch ! Vérifiez le MIN_PLAYERS ou l'API.")
         
         # Signaler que le premier fetch est terminé
         initial_fetch_done.set()
@@ -208,7 +226,9 @@ def status():
     return jsonify({
         "status": "online",
         "cache_size": len(cache_data),
-        "last_fetch": int(last_fetch_time) if last_fetch_time > 0 else None,
+        "min_players_filter": MIN_PLAYERS,
+        "universe_id": UNIVERSE_ID,
+        "last_fetch": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_fetch_time)) if last_fetch_time > 0 else None,
         "seconds_since_last_fetch": int(now - last_fetch_time) if last_fetch_time > 0 else None,
         "in_cooldown": now < cooldown_until,
         "cooldown_remaining": max(0, int(cooldown_until - now)),
