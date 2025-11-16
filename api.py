@@ -14,9 +14,10 @@ COOLDOWN_SECONDS = 60
 API_KEY = os.environ.get("API_KEY", os.environ.get("KEY", ""))
 
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 ]
 
 # ==================== VARIABLES GLOBALES ====================
@@ -63,10 +64,18 @@ def fetch_servers():
                 params["cursor"] = cursor
             
             try:
-                # Requête HTTP
+                # Requête HTTP avec headers complets
                 headers = {
                     "User-Agent": random.choice(USER_AGENTS),
-                    "Accept": "application/json"
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Referer": "https://www.roblox.com/",
+                    "Origin": "https://www.roblox.com",
+                    "Connection": "keep-alive",
+                    "Sec-Fetch-Dest": "empty",
+                    "Sec-Fetch-Mode": "cors",
+                    "Sec-Fetch-Site": "same-site"
                 }
                 
                 response = requests.get(url, params=params, headers=headers, timeout=15)
@@ -108,8 +117,8 @@ def fetch_servers():
                 if not cursor:
                     break
                 
-                # Pause entre les pages
-                time.sleep(random.uniform(0.5, 1.0))
+                # Pause entre les pages (plus longue pour éviter rate limit)
+                time.sleep(random.uniform(1.0, 2.0))
                 
             except requests.Timeout:
                 log(f"⏱️  Timeout page {page}")
@@ -248,7 +257,10 @@ if __name__ == "__main__":
     log(f"🌐 Port: {port}")
     log("=" * 50)
     
-    # Fetch initial
+    # Fetch initial avec délai pour éviter rate limit au démarrage
+    log("⏳ Attente de 5 secondes avant le fetch initial...")
+    time.sleep(5)
+    
     log("🔄 Fetch initial...")
     if fetch_servers():
         log(f"✅ {len(servers_cache)} serveurs en cache")
