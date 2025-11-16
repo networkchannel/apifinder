@@ -30,6 +30,7 @@ last_fetch_time = 0            # timestamp du dernier fetch fini (ou 0)
 cooldown_until = 0             # tant que time.time() < cooldown_until -> on n'appelle pas Roblox
 fetching_lock = threading.Lock()
 session = requests.Session()
+initial_fetch_done = threading.Event()  # Pour attendre le premier fetch
 
 # ================== UTIL ==================
 def make_headers():
@@ -116,6 +117,9 @@ def _fetch_all_pages_and_update_cache():
             print(f"✅ Cache mis à jour ({len(cache_data)} serveurs). Cooldown jusqu'à {int(cooldown_until)}.")
         else:
             print("ℹ️ Aucun serveur collecté pendant le fetch (ou fetch interrompu). Cache inchangé.")
+        
+        # Signaler que le premier fetch est terminé
+        initial_fetch_done.set()
 
 def maybe_start_fetch_in_background():
     """Démarre un thread de fetch si possible (pas en cooldown et pas déjà en cours)."""
@@ -135,13 +139,22 @@ def maybe_start_fetch_in_background():
     print("🚀 Thread de fetch lancé en arrière-plan.")
 
 def check_api_key(req: request) -> bool:
+    if not API_KEY:
+        return True  # Si pas de clé configurée, on accepte tout
     key = req.args.get("key") or req.headers.get("X-API-Key")
     return key == API_KEY
 
 # ================== ROUTES ==================
 @app.route('/')
 def home():
-    return "✅ API Roblox Finder - En ligne."
+    return jsonify({
+        "status": "online",
+        "message": "✅ API Roblox Finder - En ligne",
+        "cache_size": len(cache_data),
+        "endpoints": {
+            "/get_jobs": "Récupère la liste des serveurs (requiert API key)"
+        }
+    })
 
 @app.route('/get_jobs')
 def get_jobs():
@@ -152,6 +165,12 @@ def get_jobs():
         return jsonify({"status": "error", "message": "⛔ Clé API invalide ou manquante."}), 403
 
     now = time.time()
+
+    # Si le cache est vide et qu'aucun fetch n'est en cours, on attend le premier fetch
+    if not cache_data and not initial_fetch_done.is_set():
+        print("⏳ Premier appel avec cache vide, attente du fetch initial...")
+        # Attendre max 15 secondes pour le premier fetch
+        initial_fetch_done.wait(timeout=15)
 
     # Si on est en cooldown, on RENVOIE IMMÉDIATEMENT le cache (shuffle avant d'envoyer)
     if now < cooldown_until and cache_data:
@@ -182,11 +201,32 @@ def get_jobs():
         "servers": shuffled
     })
 
+@app.route('/status')
+def status():
+    """Endpoint pour vérifier l'état du service"""
+    now = time.time()
+    return jsonify({
+        "status": "online",
+        "cache_size": len(cache_data),
+        "last_fetch": int(last_fetch_time) if last_fetch_time > 0 else None,
+        "seconds_since_last_fetch": int(now - last_fetch_time) if last_fetch_time > 0 else None,
+        "in_cooldown": now < cooldown_until,
+        "cooldown_remaining": max(0, int(cooldown_until - now)),
+        "fetch_in_progress": fetching_lock.locked(),
+        "initial_fetch_completed": initial_fetch_done.is_set()
+    })
+
 # ================== LANCEMENT ==================
 if __name__ == "__main__":
-    # Optionnel : lancer un premier fetch au démarrage (décommenter si tu veux un cache initial)
-    # threading.Thread(target=_fetch_all_pages_and_update_cache, daemon=True).start()
-
+    print("🚀 Démarrage de l'API Roblox Finder...")
+    
+    # Lancer le premier fetch au démarrage
+    print("🔄 Lancement du fetch initial...")
+    threading.Thread(target=_fetch_all_pages_and_update_cache, daemon=True).start()
+    
     port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Serveur lancé sur le port {port}")
+    print(f"🌐 Serveur lancé sur le port {port}")
+    print(f"📡 Universe ID: {UNIVERSE_ID}")
+    print(f"🔑 API Key configurée: {'✅ Oui' if API_KEY else '⚠️ Non (mode ouvert)'}")
+    
     app.run(host='0.0.0.0', port=port)
